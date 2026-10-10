@@ -1,41 +1,62 @@
-// Phase 1.1: single LLM call against OpenCode Go (OpenAI-compatible chat completions).
-// No SDK on purpose: see the raw wire format.
+// Phase 1.2: REPL chat loop. The model is stateless: we resend the full history every turn.
 
-const BASE_URL = process.env.OPENCODE_BASE_URL ?? "https://opencode.ai/zen/go/v1";
-const MODEL = process.env.MODEL ?? "kimi-k2.7-code";
-const API_KEY = process.env.OPENCODE_API_KEY;
+import * as readline from "node:readline";
+import { stdin, stdout } from "node:process";
+import { complete, MODEL, type Message, type Usage } from "./llm.ts";
 
-if (!API_KEY) {
-  console.error("OPENCODE_API_KEY not set");
-  process.exit(1);
+const SYSTEM = "You are a concise assistant.";
+
+let sessionId = crypto.randomUUID();
+let history: Message[] = [{ role: "system", content: SYSTEM }];
+
+function formatUsage(u: Usage): string {
+  const cached = u.prompt_tokens_details?.cached_tokens ?? 0;
+  const reasoning = u.completion_tokens_details?.reasoning_tokens ?? 0;
+  return `in=${u.prompt_tokens} (cached=${cached}) out=${u.completion_tokens} (reasoning=${reasoning})`;
 }
 
-const SESSION_ID = crypto.randomUUID();
-const prompt =process.argv.slice(2).join(" ") || "Say hi in 5 words.";
+const rl = readline.createInterface({ input: stdin, output: stdout });
+console.log(`model=${MODEL} session=${sessionId}\n/reset new conversation, /history dump messages, /exit quit\n`);
 
-const res = await fetch(`${BASE_URL}/chat/completions`, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${API_KEY}`,
-    // OpenCode Go requires: stable per-conversation session id (routing + prompt caching) and own UA.
-    "x-opencode-session": SESSION_ID,
-    "User-Agent": "scratch-agent/0.1",
-  },
-  body: JSON.stringify({
-    model: MODEL,
-    messages: [{ role: "user", content: prompt }],
-  }),
-});
+let closed = false;
+rl.on("close", () => (closed = true));
+// Piped stdin closes at EOF while buffered lines are still being processed.
+const prompt = () => !closed && rl.prompt();
 
-if (!res.ok) {
-  console.error(res.status, await res.text());
-  process.exit(1);
+rl.setPrompt("> ");
+prompt();
+// Async line iterator (not rl.question): also works with piped stdin.
+for await (const line of rl) {
+  const input = line.trim();
+  if (!input) {
+    prompt();
+    continue;
+  }
+  if (input === "/exit") break;
+  if (input === "/reset") {
+    sessionId = crypto.randomUUID();
+    history = [{ role: "system", content: SYSTEM }];
+    console.log(`(new session ${sessionId})\n`);
+    prompt();
+    continue;
+  }
+  if (input === "/history") {
+    console.log(JSON.stringify(history, null, 2), "\n");
+    prompt();
+    continue;
+  }
+
+  history.push({ role: "user", content: input });
+  try {
+    const { message, finish_reason, usage } = await complete(history, sessionId);
+    history.push({ role: "assistant", content: message.content });
+    console.log(`\n${message.content}\n`);
+    console.log(`[${finish_reason}] ${formatUsage(usage)} msgs=${history.length}\n`);
+  } catch (err) {
+    history.pop(); // drop the user turn so history stays valid
+    console.error(`error: ${(err as Error).message}\n`);
+  }
+  prompt();
 }
 
-const data = await res.json();
-const choice = data.choices[0];
-console.log(choice.message.content);
-console.log("\n---");
-console.log("finish_reason:", choice.finish_reason);
-console.log("usage:", data.usage);
+rl.close();
