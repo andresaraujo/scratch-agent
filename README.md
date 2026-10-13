@@ -4,6 +4,8 @@ A coding agent built from scratch in ~380 lines of TypeScript. No SDK and no fra
 
 I'm building it to understand exactly what happens inside tools like Claude Code and Pi, and I'm writing up each step as I go.
 
+A real run, condensed:
+
 ```
 $ node src/main.ts
 > Run the tests with `node --test`, fix whatever fails, and confirm they pass.
